@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flappy Turtle</title>
+<style>
+  :root {
+    --ui: rgba(255,255,255,0.9);
+    --shadow: rgba(0,0,0,0.25);
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #03203d; /* fallback behind canvas */
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  #wrap {
+    display: grid;
+    place-items: center;
+    height: 100%;
+  }
+  canvas {
+    width: min(95vw, 900px);
+    aspect-ratio: 16 / 9;
+    max-height: 95vh;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px var(--shadow), inset 0 0 0 1px rgba(255,255,255,0.06);
+    background: linear-gradient(#0a2f55, #0d3e6e 55%, #0e567d);
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .hud {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: start center;
+    padding-top: 14px;
+    pointer-events: none;
+  }
+  .badge {
+    pointer-events: none;
+    color: #01324f;
+    background: var(--ui);
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 14px;
+    box-shadow: 0 2px 8px var(--shadow);
+    display: inline-flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .btnbar {
+    position: fixed;
+    inset: auto 0 14px 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+  }
+  .btn {
+    pointer-events: auto;
+    background: var(--ui);
+    color: #01324f;
+    border: 0;
+    font-weight: 800;
+    padding: 10px 14px;
+    border-radius: 999px;
+    box-shadow: 0 2px 8px var(--shadow);
+    cursor: pointer;
+  }
+  .btn:active { transform: translateY(1px); }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" width="1600" height="900" aria-label="Flappy Turtle canvas"></canvas>
+  </div>
+  <div class="hud"><div class="badge" id="scoreBadge">Score: 0 &nbsp;•&nbsp; Best: 0</div></div>
+  <div class="btnbar"><button class="btn" id="pauseBtn" aria-pressed="false">Pause</button></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreBadge = document.getElementById('scoreBadge');
+  const pauseBtn = document.getElementById('pauseBtn');
+
+  // Hi-DPI crispness
+  function resizeCanvasToDisplaySize() {
+    const cssWidth = canvas.clientWidth;
+    const cssHeight = canvas.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const displayWidth  = Math.floor(cssWidth * dpr);
+    const displayHeight = Math.floor(cssHeight * dpr);
+    if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+      canvas.width = displayWidth;
+      canvas.height = displayHeight;
+    }
+  }
+
+  // Game state
+  const state = {
+    phase: 'ready', // 'ready' | 'playing' | 'dead' | 'paused'
+    t: 0,
+    lastSpawn: 0,
+    spawnEvery: 1500, // ms
+    speed: 330, // px/s
+    gravity: 1500, // px/s^2
+    flapVy: -520, // px/s
+    gapMin: 240,
+    gapMax: 320,
+    reefW: 120,
+    reefs: [],
+    bubbles: [],
+    score: 0,
+    best: Number(localStorage.getItem('flappy_turtle_best')||0),
+  };
+
+  // Turtle
+  const turtle = {
+    x: 0,
+    y: 0,
+    r: 28, // collision radius
+    vy: 0,
+    rot: 0
+  };
+
+  function resetGame(full = true) {
+    resizeCanvasToDisplaySize();
+    const W = canvas.width, H = canvas.height;
+    turtle.x = Math.round(W * 0.28);
+    turtle.y = Math.round(H * 0.45);
+    turtle.vy = 0;
+    turtle.rot = 0;
+    state.reefs = [];
+    state.bubbles = [];
+    state.score = full ? 0 : state.score;
+    state.t = performance.now();
+    state.lastSpawn = state.t;
+    if (full) {
+      state.phase = 'ready';
+    }
+  }
+
+  // Input
+  function flap() {
+    if (state.phase === 'paused') return;
+    if (state.phase === 'dead') {
+      resetGame(true);
+      state.phase = 'ready';
+      return;
+    }
+    if (state.phase === 'ready') {
+      state.phase = 'playing';
+    }
+    turtle.vy = state.flapVy;
+    // little bubble puff
+    spawnBubble(turtle.x - turtle.r * 0.6, turtle.y + turtle.r * 0.3, 4);
+  }
+
+  canvas.addEventListener('pointerdown', flap);
+  window.addEventListener('keydown', (e) => {
+    if (['Space','ArrowUp','KeyW'].includes(e.code)) { e.preventDefault(); flap(); }
+    if (e.code === 'KeyP') togglePause();
+  });
+
+  pauseBtn.addEventListener('click', togglePause);
+  function togglePause() {
+    if (state.phase === 'dead') return;
+    if (state.phase === 'paused') {
+      state.phase = state.prePausePhase || 'ready';
+      state.t = performance.now();
+      pauseBtn.setAttribute('aria-pressed','false');
+      pauseBtn.textContent = 'Pause';
+      loop(); // resume
+    } else {
+      state.prePausePhase = state.phase;
+      state.phase = 'paused';
+      pauseBtn.setAttribute('aria-pressed','true');
+      pauseBtn.textContent = 'Resume';
+    }
+  }
+
+  // Reefs
+  function spawnReefPair() {
+    const W = canvas.width, H = canvas.height;
+    const gap = rand(state.gapMin, state.gapMax);
+    const margin = Math.max(60, turtle.r * 2);
+    const gapY = rand(margin, H - margin - gap);
+    const x = W + state.reefW;
+    const reef = {
+      x,
+      w: state.reefW,
+      gapY,
+      gapH: gap,
+      passed: false,
+      // subtle per-reef wobble
+      wobbleA: rand(4, 14),
+      wobbleW: rand(0.5, 1.5),
+      wobblePhi: Math.random() * Math.PI*2
+    };
+    state.reefs.push(reef);
+  }
+
+  // Bubbles (purely cosmetic)
+  function spawnBubble(x, y, burst = 1) {
+    for (let i=0;i<burst;i++) {
+      state.bubbles.push({
+        x: x + rand(-6,6),
+        y: y + rand(-6,6),
+        r: rand(2, 5),
+        vy: rand(-50, -10),
+        vx: rand(-20, 20),
+        a: Math.random()*0.5 + 0.4,
+        life: rand(0.5, 1.6)
+      });
+    }
+  }
+
+  // Helpers
+  function rand(a,b){ return Math.random()*(b-a)+a; }
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+  // Rendering
+  function drawBackground(dt, t) {
+    const W = canvas.width, H = canvas.height;
+
+    // ocean gradient already set as canvas bg via CSS; add parallax caustics & light rays
+    // Light rays
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    const rayCount = 4;
+    for (let i=0;i<rayCount;i++){
+      const x = (t*0.00003 * (i+1) * 200 + i*W*0.25) % (W+300) - 150;
+      const grad = ctx.createLinearGradient(x, 0, x+150, H);
+      grad.addColorStop(0, 'rgba(255,255,255,0.18)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(x,0);
+      ctx.lineTo(x+150,0);
+      ctx.lineTo(x+50,H);
+      ctx.lineTo(x-100,H);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Distant particles
+    ctx.save();
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = '#fff';
+    for (let i=0;i<60;i++){
+      const px = (i*271 + (t*0.03)) % W;
+      const py = (i*i*43) % H;
+      ctx.beginPath();
+      ctx.arc(px, py, (i%3)+1, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawBubbles(dt) {
+    const W = canvas.width, H = canvas.height;
+    for (let i = state.bubbles.length - 1; i >= 0; i--) {
+      const b = state.bubbles[i];
+      b.y += b.vy * dt;
+      b.x += b.vx * dt;
+      b.a -= dt / b.life;
+      if (b.a <= 0 || b.y + b.r < 0) { state.bubbles.splice(i,1); continue; }
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, b.a);
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawCoralColumn(x, y, w, h, t) {
+    // Draw a wavy coral column with bulbous tips
+    ctx.save();
+    const color = '#ff7a59';
+    const darker = '#bf5039';
+    ctx.fillStyle = color;
+    ctx.strokeStyle = darker;
+    ctx.lineWidth = Math.max(2, w*0.05);
+
+    ctx.beginPath();
+    const segments = Math.max(6, Math.floor(Math.abs(h)/60));
+    const dir = Math.sign(h);
+    const segH = h / segments;
+
+    let cx = x, cy = y;
+    ctx.moveTo(cx, cy);
+    for (let i=1;i<=segments;i++){
+      const ny = y + segH * i;
+      const wob = Math.sin((t*0.002) + i*0.9) * (w*0.12);
+      const nx = x + wob;
+      const ctrlx = (cx + nx) / 2 + Math.sin((t*0.003)+i)*w*0.1;
+      const ctrly = (cy + ny) / 2;
+      ctx.quadraticCurveTo(ctrlx, ctrly, nx, ny);
+      cx = nx; cy = ny;
+    }
+    // thickness
+    const pad = w * 0.45;
+    ctx.lineTo(cx + pad, cy);
+    for (let i=segments;i>=0;i--){
+      const ny = y + segH * i;
+      const wob = Math.sin((t*0.002) + i*0.9 + Math.PI*0.5) * (w*0.12);
+      const nx = x + wob;
+      const ctrlx = (cx + nx) / 2 + Math.cos((t*0.003)+i)*w*0.1;
+      const ctrly = (cy + ny) / 2;
+      ctx.quadraticCurveTo(ctrlx+pad, ctrly, nx+pad, ny);
+      cx = nx; cy = ny;
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // polyps
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#ffd0c4';
+    for (let i=0;i<Math.max(10, Math.floor(Math.abs(h)/14)); i++){
+      const px = x + pad*0.2 + Math.random()*pad*0.6 + Math.sin((t*0.004)+i)*pad*0.2;
+      const py = dir>0 ? y + Math.random()*h : y + Math.random()*h;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  function drawReefs(dt, t) {
+    const W = canvas.width, H = canvas.height;
+    // move and draw
+    for (let i = state.reefs.length - 1; i >= 0; i--) {
+      const r = state.reefs[i];
+      r.x -= state.speed * dt;
+
+      // wobble the gap a bit
+      const wob = Math.sin(t*0.001 * r.wobbleW + r.wobblePhi) * r.wobbleA;
+      const gapY = clamp(r.gapY + wob, 40, H - 40 - r.gapH);
+
+      // Draw top column (downwards height)
+      drawCoralColumn(r.x, gapY, r.w, -gapY, t);
+      // Draw bottom column (upwards height)
+      drawCoralColumn(r.x, gapY + r.gapH, r.w, H - (gapY + r.gapH), t);
+
+      // scoring
+      if (!r.passed && r.x + r.w < turtle.x - turtle.r) {
+        r.passed = true;
+        state.score++;
+        state.best = Math.max(state.best, state.score);
+        localStorage.setItem('flappy_turtle_best', String(state.best));
+        // celebratory bubbles
+        spawnBubble(turtle.x, turtle.y, 10);
+      }
+
+      // cleanup
+      if (r.x + r.w < -10) state.reefs.splice(i,1);
+    }
+  }
+
+  function drawTurtle(dt) {
+    const W = canvas.width, H = canvas.height;
+
+    // physics
+    if (state.phase === 'playing') {
+      turtle.vy += state.gravity * dt;
+      turtle.y += turtle.vy * dt;
+    } else if (state.phase === 'ready') {
+      // idle bob
+      turtle.y += Math.sin(state.t*0.004) * 0.5;
+    }
+
+    // rotation based on vertical velocity
+    turtle.rot = clamp(turtle.vy * 0.0012, -0.6, 0.9);
+
+    // collision with bounds
+    if (turtle.y - turtle.r < 0) {
+      turtle.y = turtle.r;
+      turtle.vy = 0;
+    }
+    if (turtle.y + turtle.r > H) {
+      turtle.y = H - turtle.r;
+      if (state.phase === 'playing') die();
+    }
+
+    // draw turtle (simple but cute)
+    ctx.save();
+    ctx.translate(turtle.x, turtle.y);
+    ctx.rotate(turtle.rot);
+
+    // shadow
+    ctx.save();
+    ctx.globalAlpha = 0.15;
+    ctx.beginPath();
+    ctx.ellipse(0, turtle.r*0.9, turtle.r*1.2, turtle.r*0.5, 0, 0, Math.PI*2);
+    ctx.fillStyle = '#000';
+    ctx.fill();
+    ctx.restore();
+
+    // flippers
+    const flip = Math.sin(performance.now()*0.02) * (state.phase==='playing'?1.0:0.6);
+    ctx.fillStyle = '#2aa37f';
+    ctx.strokeStyle = '#1e7c61';
+    ctx.lineWidth = 3;
+
+    function flipper(ax, ay, dir=1){
+      ctx.save();
+      ctx.translate(ax, ay);
+      ctx.rotate(dir * (0.7 + flip * 0.4));
+      ctx.beginPath();
+      ctx.moveTo(0,0);
+      ctx.quadraticCurveTo(20*dir, 10, 36*dir, -2);
+      ctx.quadraticCurveTo(44*dir, -8, 38*dir, -16);
+      ctx.quadraticCurveTo(26*dir, -6, 0,0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+    flipper(-12, 8, -1); // left
+    flipper( -6, 10,  1); // right
+
+    // shell
+    ctx.beginPath();
+    ctx.fillStyle = '#2d6a4f';
+    ctx.strokeStyle = '#184d3a';
+    ctx.lineWidth = 4;
+    ctx.ellipse(0, 0, turtle.r*1.05, turtle.r*0.85, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+
+    // scutes
+    ctx.save();
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 2;
+    for (let i=0;i<6;i++){
+      const a = (i/6)*Math.PI*2 + 0.2;
+      ctx.beginPath();
+      ctx.arc(0, 0, turtle.r*0.2 + i*4, a, a + Math.PI*1.2);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // head
+    ctx.save();
+    ctx.translate(turtle.r*0.9, -turtle.r*0.2);
+    ctx.beginPath();
+    ctx.fillStyle = '#3dbb93';
+    ctx.strokeStyle = '#1e7c61';
+    ctx.lineWidth = 3;
+    ctx.ellipse(0, 0, turtle.r*0.55, turtle.r*0.42, 0.1, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+
+    // eye
+    ctx.beginPath();
+    ctx.fillStyle = '#fff';
+    ctx.arc(turtle.r*0.15, -turtle.r*0.06, 6, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.fillStyle = '#0b2b45';
+    ctx.arc(turtle.r*0.2, -turtle.r*0.06, 3, 0, Math.PI*2);
+    ctx.fill();
+
+    // smile
+    ctx.beginPath();
+    ctx.strokeStyle = '#0b2b45';
+    ctx.lineWidth = 2;
+    ctx.arc(turtle.r*0.18, turtle.r*0.06, 6, 0.1, 0.9);
+    ctx.stroke();
+
+    ctx.restore();
+    ctx.restore();
+  }
+
+  function checkCollisions() {
+    if (state.phase !== 'playing') return;
+    // circle-rect intersection (approx) with both columns
+    for (const r of state.reefs) {
+      const rects = [
+        {x: r.x, y: 0, w: r.w, h: r.gapY}, // top
+        {x: r.x, y: r.gapY + r.gapH, w: r.w, h: canvas.height - (r.gapY + r.gapH)} // bottom
+      ];
+      for (const rect of rects) {
+        const cx = clamp(turtle.x, rect.x, rect.x + rect.w);
+        const cy = clamp(turtle.y, rect.y, rect.y + rect.h);
+        const dx = turtle.x - cx;
+        const dy = turtle.y - cy;
+        if (dx*dx + dy*dy < turtle.r * turtle.r) {
+          die();
+          return;
+        }
+      }
+    }
+  }
+
+  function die() {
+    if (state.phase !== 'playing') return;
+    state.phase = 'dead';
+    // burst bubbles
+    spawnBubble(turtle.x, turtle.y, 24);
+  }
+
+  function drawUI() {
+    const W = canvas.width, H = canvas.height;
+    // Score badge text
+    scoreBadge.textContent = `Score: ${state.score} • Best: ${state.best}`;
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 6;
+
+    if (state.phase === 'ready') {
+      const title = 'FLAPPY TURTLE';
+      const sub = 'Tap / Click / Space to Flap';
+      ctx.font = `${Math.floor(W*0.06)}px Impact, sans-serif`;
+      ctx.strokeText(title, W/2, H*0.28);
+      ctx.fillText(title, W/2, H*0.28);
+      ctx.font = `${Math.floor(W*0.03)}px 700 system-ui`;
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillText(sub, W/2, H*0.36);
+    }
+    if (state.phase === 'dead') {
+      const gameOver = 'GAME OVER';
+      const hint = 'Tap to retry';
+      ctx.font = `${Math.floor(W*0.06)}px Impact, sans-serif`;
+      ctx.strokeText(gameOver, W/2, H*0.35);
+      ctx.fillText(gameOver, W/2, H*0.35);
+      ctx.font = `${Math.floor(W*0.03)}px 700 system-ui`;
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillText(`Score: ${state.score} • Best: ${state.best}`, W/2, H*0.42);
+      ctx.fillText(hint, W/2, H*0.48);
+    }
+    if (state.phase === 'paused') {
+      const txt = 'PAUSED';
+      ctx.font = `${Math.floor(W*0.06)}px Impact, sans-serif`;
+      ctx.strokeText(txt, W/2, H*0.35);
+      ctx.fillText(txt, W/2, H*0.35);
+      ctx.font = `${Math.floor(W*0.03)}px 700 system-ui`;
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillText('Press Resume or P', W/2, H*0.42);
+    }
+    ctx.restore();
+  }
+
+  // Main loop
+  function loop(now = performance.now()) {
+    if (state.phase === 'paused') return; // halt render
+    resizeCanvasToDisplaySize();
+    const W = canvas.width, H = canvas.height;
+
+    const dt = Math.min(0.035, (now - state.t) / 1000); // clamp to avoid big jumps
+    state.t = now;
+
+    // Clear
+    ctx.clearRect(0,0,W,H);
+
+    // Layers
+    drawBackground(dt, now);
+    if (state.phase === 'playing') {
+      // spawn reefs
+      if (now - state.lastSpawn > state.spawnEvery) {
+        state.lastSpawn = now;
+        spawnReefPair();
+      }
+      // ambient random bubbles
+      if (Math.random() < 0.06) {
+        spawnBubble(rand(W*0.1, W*0.9), H - 4, 1);
+      }
+    }
+
+    drawReefs(dt, now);
+    drawTurtle(dt);
+    drawBubbles(dt);
+    checkCollisions();
+    drawUI();
+
+    requestAnimationFrame(loop);
+  }
+
+  // Kickoff
+  resetGame(true);
+  loop();
+
+  // Resize handling: keep gameplay consistent when rotating
+  window.addEventListener('resize', () => {
+    // keep turtle roughly centered vertically when resizing
+    const prevH = canvas.height;
+    resizeCanvasToDisplaySize();
+    const newH = canvas.height;
+    const ratio = newH / Math.max(1, prevH);
+    turtle.y *= ratio;
+  });
+})();
+</script>
+</body>
+</html>
